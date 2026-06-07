@@ -1,0 +1,23 @@
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+c = canvas.Canvas("sample_prescription.pdf", pagesize=A4)
+c.setFont("Helvetica-Bold", 16)
+c.drawString(100, 780, "City Medical Centre")
+c.setFont("Helvetica", 12)
+c.drawString(100, 760, "Dr. Anil Sharma | MBBS, MD | Reg No: 12345")
+c.drawString(100, 720, "Patient: Rahul Verma | DOB: 15-Mar-1985")
+c.drawString(100, 700, "Date: 2024-11-10")
+c.setFont("Helvetica-Bold", 13)
+c.drawString(100, 660, "Rx:")
+c.setFont("Helvetica", 12)
+c.drawString(100, 640, "1. Metformin 500mg - twice daily after meals - 90 days")
+c.drawString(100, 620, " For: Type 2 Diabetes management")
+c.drawString(100, 600, "2. Atorvastatin 10mg - once daily at bedtime - 90 days")
+c.drawString(100, 580, " For: High cholesterol")
+c.drawString(100, 560, "3. Aspirin 75mg - once daily - 90 days")
+c.drawString(100, 540, " For: Cardiovascular prevention")
+c.drawString(100, 500, "Follow-up in 3 months. Monitor HbA1c and lipid profile.")
+c.drawString(100, 480, "Avoid alcohol. Take Metformin with food.")
+c.save()
+print("sample_prescription.pdf created")
