@@ -10,3 +10,7 @@ wheels/
 *.db
 __pycache__/
 .venv/
+HODReport.pdf
+settings.json
+.vscode/
+
