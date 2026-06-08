@@ -86,7 +86,7 @@ def extract_health_entities(text: str) -> dict:
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         contents=f"{EXTRACTION_PROMPT}\n\nExtract health entities from this document:\n\n{text}"
     )
 

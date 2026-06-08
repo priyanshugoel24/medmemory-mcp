@@ -93,3 +93,41 @@ def get_lab_trend(conn: sqlite3.Connection, marker_name: str) -> list[dict]:
     (marker_name,)
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+
+
+
+#----------Visits--------------
+
+def insert_visit(conn : sqlite3.Connection, data : dict) -> int:
+    """Insert a doctor visit record. Returns the new row id."""
+    cursor = conn.execute(
+        """INSERT INTO visits(visit_date, speciality, doctor_name, diagnosis, notes, follow_up, source_document) VALUES (?, ? , ? , ? , ? , ? , ?)""",
+        (
+            data.get("visit_date"),
+            data.get("speciality") or data.get("specialty"),
+            data.get("doctor_name"),
+            data.get("diagnosis"),
+            data.get("notes"),
+            data.get("follow_up"),
+            data.get("source_document"),
+        )
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+def get_visit_history(conn : sqlite3.Connection, speciality : str | None = None) -> list[dict]:
+    """Return all visits, newest first. Optionally filter by speciality (case-insensitive)."""
+
+    if speciality:
+        cursor = conn.execute(
+            """SELECT visit_date, speciality, doctor_name, diagnosis, notes, follow_up FROM visits WHERE LOWER(speciality) LIKE LOWER(?) ORDER BY visit_date DESC""",
+            (f"%{speciality}%",)
+        )
+    else :
+        cursor = conn.execute(
+            """SELECT visit_date, speciality, doctor_name, diagnosis, notes, follow_up FROM visits ORDER BY visit_date DESC"""
+        )
+
+    return [dict(row) for row in cursor.fetchall()]

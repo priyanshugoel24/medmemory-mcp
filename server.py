@@ -2,7 +2,7 @@ from typing import AsyncIterator
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from mcp.server.fastmcp import FastMCP, Context
-from db.database import get_connection, get_active_medications, get_lab_trend as db_get_lab_trend, insert_medications, insert_lab_result
+from db.database import get_connection, get_active_medications, get_lab_trend as db_get_lab_trend, insert_medications, insert_lab_result, insert_visit, get_visit_history as db_get_visit_history
 import sqlite3
 from ingestion.extractor import extract_text, extract_health_entities
 
@@ -31,7 +31,7 @@ async def get_current_medications(ctx : Context) -> list[dict]:
 
 
     if not medications:
-        return [{"message" : "No active medications found in the databse."}]
+        return [{"message" : "No active medications found in the database."}]
 
     return medications
 
@@ -120,6 +120,27 @@ async def ingest_health_documents(file_path : str, ctx : Context) -> dict:
         "diagnoses" : entities.get("diagnoses", []),
         "follow_up" : entities.get("follow_up"),
     }
+
+@mcp.tool()
+async def get_visit_history(ctx : Context, speciality : str | None = None) -> list[dict] : 
+    """Use this tool when asked about:
+     
+     1. Doctor visits, appointments, consultations
+     2. what a specific specialist said
+     3. medical history by speciality
+     4. preparing for a new doctor appointment
+     """
+
+    db = ctx.request_context.lifespan_context["db"]
+
+    history = db_get_visit_history(db, speciality)
+
+    if not history :
+        return [{"message" : "No visitation history found in the database."}]
+
+    return history
+
+     
     
     
 
