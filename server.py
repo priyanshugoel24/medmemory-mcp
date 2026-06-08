@@ -1,3 +1,8 @@
+from ingestion import vaccine_schedule
+from ingestion import vaccine_schedule
+from ingestion import vaccine_schedule
+from ingestion import vaccine_schedule
+from db.database import get_all_vaccinations
 from typing import AsyncIterator
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -5,6 +10,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from db.database import get_connection, get_active_medications, get_lab_trend as db_get_lab_trend, insert_medications, insert_lab_result, insert_visit, get_visit_history as db_get_visit_history
 import sqlite3
 from ingestion.extractor import extract_text, extract_health_entities
+from ingestion.vaccine_schedule import WHO_ADULT_SCHEDULE
 
 
 @asynccontextmanager
@@ -141,7 +147,66 @@ async def get_visit_history(ctx : Context, speciality : str | None = None) -> li
     return history
 
      
-    
+
+@mcp.tool()
+async def get_vaccination_status(ctx: Context) -> dict:
+    """Returns all recorded vaccinations and flags overdue or missing ones.
+
+    Use this when the user asks about:
+    - their vaccination history or immunisation records
+    - whether they are up to date on vaccines
+    - what vaccines they are missing or overdue for
+    - travel vaccine recommendations
+    """
+    from datetime import date, datetime
+
+    db = ctx.request_context.lifespan_context["db"]
+    records = get_all_vaccinations(db)
+
+    # Build a set of vaccine names already on record (lowercase for matching)
+    received = {}
+    for r in records:
+        name_lower = r["vaccine_name"].lower()
+        if name_lower not in received:
+            received[name_lower] = r
+    # keep the most recent record per vaccine
+        elif r["date_administered"] > received[name_lower]["date_administered"]:
+            received[name_lower] = r
+
+    today = date.today()
+    overdue = []
+    missing = []
+
+    for vaccine_name, schedule in WHO_ADULT_SCHEDULE.items():
+        name_lower = vaccine_name.lower()
+        record = received.get(name_lower)
+
+        if record is None:
+            # Never received this vaccine
+            missing.append({
+                "vaccine": vaccine_name,
+                "notes": schedule["notes"]
+            })
+        elif schedule["interval_years"] is not None:
+            # Check if booster is overdue
+            last_date = datetime.strptime(
+                record["date_administered"], "%Y-%m-%d"
+            ).date()
+            years_since = (today - last_date).days / 365.25
+            if years_since > schedule["interval_years"]:
+                overdue.append({
+                    "vaccine": vaccine_name,
+                    "last_received": record["date_administered"],
+                    "overdue_by_years": round(years_since - schedule["interval_years"], 1),
+                    "notes": schedule["notes"]
+                })
+
+    return {
+        "vaccinations_on_record": records,
+        "overdue": overdue,
+        "missing": missing,
+        "disclaimer": "Consult your doctor before making vaccination decisions."
+    }
     
 
 

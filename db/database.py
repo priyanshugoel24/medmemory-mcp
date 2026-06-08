@@ -131,3 +131,37 @@ def get_visit_history(conn : sqlite3.Connection, speciality : str | None = None)
         )
 
     return [dict(row) for row in cursor.fetchall()]
+
+
+
+
+# ── Vaccinations ─────────────────────────────────────────
+
+def insert_vaccination(conn: sqlite3.Connection, data: dict) -> int:
+    """Insert a vaccination record. Returns the new row id."""
+    cursor = conn.execute(
+        """INSERT INTO vaccinations
+        (vaccine_name, date_administered, dose_number,
+        provider, source_document)
+        VALUES (?, ?, ?, ?, ?)""",
+        (
+            data.get("vaccine_name"),
+            data.get("date_administered"),
+            data.get("dose_number", 1),
+            data.get("provider"),
+            data.get("source_document"),
+        )
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_all_vaccinations(conn: sqlite3.Connection) -> list[dict]:
+    """Return all vaccination records, newest first."""
+    cursor = conn.execute(
+        """SELECT vaccine_name, date_administered,
+        dose_number, provider
+        FROM vaccinations
+        ORDER BY date_administered DESC"""
+    )
+    return [dict(row) for row in cursor.fetchall()]
