@@ -7,7 +7,7 @@ from typing import AsyncIterator
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from mcp.server.fastmcp import FastMCP, Context
-from db.database import get_connection, get_active_medications, get_lab_trend as db_get_lab_trend, insert_medications, insert_lab_result, insert_visit, get_visit_history as db_get_visit_history
+from db.database import get_connection, get_active_medications, get_lab_trend as db_get_lab_trend, insert_medications, insert_lab_result, insert_visit, get_visit_history as db_get_visit_history, insert_vaccination, get_all_vaccinations
 import sqlite3
 from ingestion.extractor import extract_text, extract_health_entities
 from ingestion.vaccine_schedule import WHO_ADULT_SCHEDULE
@@ -293,6 +293,70 @@ async def check_drug_interaction(new_drug: str, ctx: Context) -> dict:
             "starting any new medication."
         )
     }
+
+@mcp.tool()
+async def generate_health_summary(ctx : Context) -> dict :
+    """Generate a complete health summary suitable for sharing with a new doctor.
+
+    Use this when the user asks for :
+    - a health summary or medical summary
+    - a document to bring to a new doctor or a specialist
+    - an overview of their complete health records
+    - a printable health report
+    - a summary of everything in their health record
+
+    No inputs needed - pulls all data from the health record automatically.
+    """
+
+    from datetime import date
+    
+    db = ctx.request_context.lifespan_context["db"]
+
+    #Pull data from every table
+    medications = get_active_medications(db)
+    visits = db_get_visit_history(db)
+    vaccinations = get_all_vaccinations(db)
+
+
+    #Get the most recent reading for common lab markers
+    common_markers = ["HbA1c", "TSH", "creatinine", "hemoglobin",
+"cholesterol", "blood pressure", "fasting glucose"]
+    recent_labs = {}
+    for marker in common_markers :
+        trend = db_get_lab_trend(db, marker)
+        if trend:
+            recent_labs[marker] = trend[-1]
+
+    pending_followups = [{
+        "from_visit": v["visit_date"],
+        "doctor": v["doctor_name"],
+        "follow_up": v["follow_up"]
+    } for v in visits
+    if v.get("follow_up") and v["follow_up"].lower() != "none"
+    ]
+
+    #Most recent visit per speciality
+    seen_specialities = set()
+    recent_visits = []
+    for v in visits:
+        if v["speciality"] not in seen_specialities:
+            seen_specialities.add(v["speciality"])
+            recent_visits.append(v)
+
+    return {
+        "generated_on": date.today().isoformat(),
+        "active_medications": medications,
+        "recent_lab_results": recent_labs,
+        "recent_visits_by_specialty": recent_visits,
+        "vaccinations_on_record": vaccinations,
+        "pending_follow_ups": pending_followups,
+        "disclaimer": (
+            "This summary is generated from personally stored health records. "
+            "Always verify with your healthcare provider before making medical decisions."
+        )
+    }
+    
+
 
 
 
