@@ -11,6 +11,8 @@ from db.database import get_connection, get_active_medications, get_lab_trend as
 import sqlite3
 from ingestion.extractor import extract_text, extract_health_entities
 from ingestion.vaccine_schedule import WHO_ADULT_SCHEDULE
+import httpx
+import os
 
 
 @asynccontextmanager
@@ -207,7 +209,93 @@ async def get_vaccination_status(ctx: Context) -> dict:
         "missing": missing,
         "disclaimer": "Consult your doctor before making vaccination decisions."
     }
-    
+
+@mcp.tool()
+async def check_drug_interaction(new_drug: str, ctx: Context) -> dict:
+    """Check if a newly prescribed drug interacts with current medications.
+
+    Use this when the user:
+    - has been prescribed a new medication and wants to check safety
+    - asks 'is X safe to take with my current medications'
+    - wants to know about drug interactions before starting a new drug
+
+    Args:
+        new_drug: Name of the newly prescribed drug to check (generic or brand name)
+    """
+    db = ctx.request_context.lifespan_context["db"]
+    api_key = os.getenv("OPENFDA_API_KEY", "")
+
+    # Step 1: get current medications from DB
+    current_meds = get_active_medications(db)
+    if not current_meds:
+        return {
+            "new_drug": new_drug,
+            "current_medications": [],
+            "interaction_data": None,
+            "message": "No current medications on record to check against."
+        }
+
+    current_med_names = [m["drug_name"] for m in current_meds]
+
+    # Step 2: query OpenFDA for the new drug's interaction data
+    interaction_text = None
+    drug_found = False
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.get(
+                "https://api.fda.gov/drug/label.json",
+                params={
+                    "search": f"openfda.generic_name:{new_drug.lower()}",
+                    "limit": 5,
+                    "api_key": api_key
+                }
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("results"):
+                    drug_found = True
+                    # Try each result until we find one with interaction data
+                    for result in data["results"]:
+                        for field in ["drug_interactions", "warnings_and_cautions",
+                                      "warnings", "precautions"]:
+                            content = result.get(field, [])
+                            if content:
+                                interaction_text = content[0][:1000]
+                                break
+                        if interaction_text:
+                            break
+
+            elif response.status_code == 404:
+                drug_found = False
+
+        except httpx.TimeoutException:
+            return {
+                "new_drug": new_drug,
+                "error": "OpenFDA API timed out. Try again in a moment."
+            }
+        except Exception as e:
+            return {
+                "new_drug": new_drug,
+                "error": f"API call failed: {str(e)}"
+            }
+
+    # Step 3: return structured result
+    return {
+        "new_drug": new_drug,
+        "current_medications": current_med_names,
+        "drug_found_in_fda_database": drug_found,
+        "interaction_data": interaction_text,
+        "disclaimer": (
+            "This is FDA label data for informational purposes only. "
+            "Always confirm with your doctor or pharmacist before "
+            "starting any new medication."
+        )
+    }
+
+
+
 
 
 if __name__ == "__main__":
