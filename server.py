@@ -1,3 +1,4 @@
+from ingestion.extractor import extract_text_or_image
 from ingestion import vaccine_schedule
 from ingestion import vaccine_schedule
 from ingestion import vaccine_schedule
@@ -73,18 +74,18 @@ async def ingest_health_documents(file_path : str, ctx : Context) -> dict:
 
     #Step1 : extract text from the document
     try:
-        text = extract_text(file_path)
+        content, mode = extract_text_or_image(file_path)
     except FileNotFoundError:
         return {"success" : False, "error" : f"File not found : {file_path}"}
     except ValueError as e:
         return {"success" : False, "error" : str(e)}
 
-    if not text.strip():
+    if not content.strip() and mode == "text":
         return {"success" : False, "error" : "Could not extract any text from the document."}
 
     #Step 2 : extract structured health entities via Gemini
     try:
-        entities = extract_health_entities(text)
+        entities = extract_health_entities(content, mode)
     except Exception as e:
         return {"success" : False, "error" : f"AI extraction failed : {e}"}
 
@@ -120,7 +121,7 @@ async def ingest_health_documents(file_path : str, ctx : Context) -> dict:
     #Step 5 : return a summary of what was saved
     return {
         "success" : True,
-        "document_tyep" : entities.get("document_type"),
+        "document_type" : entities.get("document_type"),
         "document_date" : entities.get("document_date"),
         "doctor_name" : entities.get("doctor_name"),
         "medications_saved" : meds_saved,
