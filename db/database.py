@@ -1,5 +1,10 @@
-import sqlite3
+import sqlcipher3 as sqlite3
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 #Always store the DB next to this file
 DB_PATH = Path(__file__).parent / "medmemory.db"
@@ -10,17 +15,32 @@ def get_connection() -> sqlite3.Connection:
     Creates the DB and schema on first run.
     """
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row #access columns by name, not index
+    key = os.getenv("MEDMEMORY_DB_KEY", "default-dev-key")
+    conn = sqlite3.connect(str(DB_PATH))
+
+    # SQLCipher: key PRAGMA must come first, before ANY other operation
+    conn.execute(f"PRAGMA key='{key}'")
+    conn.execute("PRAGMA cipher_compatibility = 4")
+
+    # Set these AFTER key is applied
+    conn.row_factory = sqlite3.Row  # access columns by name, not index
     conn.execute("PRAGMA foreign_keys = ON")
     _ensure_schema(conn)
     return conn
 
-def _ensure_schema(conn : sqlite3.Connection) -> None :
+def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Create tables if they don't exist yet."""
+    import re
     schema = SCHEMA_PATH.read_text()
-    conn.executescript(schema)
+    # Split on semicolons that are NOT inside single-quoted strings.
+    # This handles DEFAULT (datetime('now')) correctly.
+    statements = re.split(r";\s*(?=(?:[^']*'[^']*')*[^']*$)", schema)
+    for statement in statements:
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
     conn.commit()
+
 
 #-------------Medications------------------------
 
