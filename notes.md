@@ -61,3 +61,9 @@
 3. Handwritten OCR improvement (Day 16 — try Gemini Vision instead)
 4. Combination drug splitting (Day 16 prompt fix)
 5. Duplicate detection (Day 18)
+
+
+- [x] Handwritten prescriptions: Gemini Vision — working
+- [x] Marker names normalised: LDL, TSH, hemoglobin — working  
+- [x] Brand → generic: Gabantin, Zerodol-P, Pantocid — working
+- [x] Combination drugs split: Zerodol-P → Aceclofenac + Paracetamol — working

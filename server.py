@@ -1,3 +1,5 @@
+from datetime import date
+from mcp.server.experimental import task_result_handler
 from ingestion.extractor import extract_text_or_image
 from ingestion import vaccine_schedule
 from ingestion import vaccine_schedule
@@ -14,6 +16,11 @@ from ingestion.extractor import extract_text, extract_health_entities
 from ingestion.vaccine_schedule import WHO_ADULT_SCHEDULE
 import httpx
 import os
+from logger import get_logger
+
+
+
+logger = get_logger("medmemory.server")
 
 
 @asynccontextmanager
@@ -35,6 +42,7 @@ async def get_current_medications(ctx : Context) -> list[dict]:
 
     Use this when the user asks what medications they are taking, what drugs they are currently on, or what their current prescriptions are. Filters out completed medication courses automatically."""
 
+    logger.info("get_current_medications called")
     db = ctx.request_context.lifespan_context["db"]
     medications = get_active_medications(db)
 
@@ -42,6 +50,8 @@ async def get_current_medications(ctx : Context) -> list[dict]:
     if not medications:
         return [{"message" : "No active medications found in the database."}]
 
+
+    logger.info(f"get_current_medications → {len(medications)} active medications")
     return medications
 
 @mcp.tool()
@@ -51,12 +61,15 @@ async def get_lab_trend(ctx : Context, marker_name : str) -> list[dict]:
 
     Use this when the user asks about trends, progress, changes over time, historical readings or whether something is getting better or worse for a specific lab marker.
     """
+
+    logger.info(f"get_lab_trend called | marker={marker_name}")
     db = ctx.request_context.lifespan_context["db"]
     lab_trends = db_get_lab_trend(db, marker_name)
 
     if not lab_trends:
         return [{"message" : f"No lab trend found for {marker_name} in the database."}]
-    
+    logger.info(f"get_lab_trend → {len(lab_trends)} readings found")
+
     return lab_trends
     
 
@@ -70,23 +83,34 @@ async def ingest_health_documents(file_path : str, ctx : Context) -> dict:
         file_path : Absolute path to the PDF or image file to ingest.
     """
 
+    logger.info(f"ingest_health_document called | file={file_path}")
     db = ctx.request_context.lifespan_context["db"]
 
     #Step1 : extract text from the document
     try:
         content, mode = extract_text_or_image(file_path)
+        logger.debug(f"Extraction mode={mode} | content_length={len(content)}")
     except FileNotFoundError:
+        logger.warning(f"File not found : {file_path}")
         return {"success" : False, "error" : f"File not found : {file_path}"}
     except ValueError as e:
+        logger.error(f"file extraction failed : {e}")
         return {"success" : False, "error" : str(e)}
 
     if not content.strip() and mode == "text":
+        logger.error("No text extracted from document")
         return {"success" : False, "error" : "Could not extract any text from the document."}
 
     #Step 2 : extract structured health entities via Gemini
     try:
         entities = extract_health_entities(content, mode)
+        logger.info(
+            f"Entities extracted | type={entities.get('document_type')} | "
+            f"meds={len(entities.get('medications', []))} | "
+            f"labs={len(    entities.get('lab_results', []))}"
+            )
     except Exception as e:
+        logger.error(f"AI extraction failed : {e}")
         return {"success" : False, "error" : f"AI extraction failed : {e}"}
 
     #Step 3 : save medications to DB
@@ -118,6 +142,8 @@ async def ingest_health_documents(file_path : str, ctx : Context) -> dict:
             })
             labs_saved += 1
 
+
+    logger.info(f"Ingestion complete | meds_saved={meds_saved} | "f"labs_saved={labs_saved} | file={file_path}")
     #Step 5 : return a summary of what was saved
     return {
         "success" : True,
@@ -140,6 +166,7 @@ async def get_visit_history(ctx : Context, speciality : str | None = None) -> li
      4. preparing for a new doctor appointment
      """
 
+    logger.info(f"get_visit_history called | specialty={speciality}")
     db = ctx.request_context.lifespan_context["db"]
 
     history = db_get_visit_history(db, speciality)
@@ -163,6 +190,7 @@ async def get_vaccination_status(ctx: Context) -> dict:
     """
     from datetime import date, datetime
 
+    logger.info("get_vaccination_status called")
     db = ctx.request_context.lifespan_context["db"]
     records = get_all_vaccinations(db)
 
@@ -223,6 +251,8 @@ async def check_drug_interaction(new_drug: str, ctx: Context) -> dict:
     Args:
         new_drug: Name of the newly prescribed drug to check (generic or brand name)
     """
+
+    logger.info(f"check_drug_interaction called | new_drug={new_drug}")
     db = ctx.request_context.lifespan_context["db"]
     api_key = os.getenv("OPENFDA_API_KEY", "")
 
@@ -282,6 +312,8 @@ async def check_drug_interaction(new_drug: str, ctx: Context) -> dict:
                 "error": f"API call failed: {str(e)}"
             }
 
+
+    logger.info(f"check_drug_interaction → drug_found={drug_found} | has_interaction_data={interaction_text is not None}")
     # Step 3: return structured result
     return {
         "new_drug": new_drug,
@@ -308,9 +340,8 @@ async def generate_health_summary(ctx : Context) -> dict :
 
     No inputs needed - pulls all data from the health record automatically.
     """
-
-    from datetime import date
     
+    logger.info("generate_health_summary called")
     db = ctx.request_context.lifespan_context["db"]
 
     #Pull data from every table

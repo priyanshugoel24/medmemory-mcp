@@ -7,6 +7,10 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 import base64
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from logger import get_logger
+extractor_logger = get_logger("medmemory.extractor")
 
 
 load_dotenv()
@@ -17,6 +21,8 @@ def extract_text_or_image(file_path: str) -> tuple[str, str]:
     mode is 'text' for native PDFs, 'image' for scanned/handwritten ones.
     For image mode, content is base64-encoded image data.
     """
+
+    extractor_logger.debug(f"Extracting from {file_path}")
     path = Path(file_path)
 
     # For image files — always use vision mode
@@ -184,6 +190,8 @@ def extract_health_entities(content: str, mode: str = "text") -> dict:
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1]
             raw = raw.rsplit("```", 1)[0].strip()
+
+        extractor_logger.debug(f"Gemini response length: {len(raw)} chars")
 
         try:
             return json.loads(raw)
