@@ -13,4 +13,5 @@ dependencies = [
     "pymupdf4llm>=1.27.2.3",
     "python-dotenv>=1.2.2",
     "reportlab>=4.5.1",
+    "sqlcipher3>=0.6.2",
 ]
