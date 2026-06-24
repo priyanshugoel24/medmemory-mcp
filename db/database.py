@@ -165,3 +165,52 @@ def get_all_vaccinations(conn: sqlite3.Connection) -> list[dict]:
         ORDER BY date_administered DESC"""
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+# ── Allergies ─────────────────────────────────────────────
+
+def insert_allergy(conn: sqlite3.Connection, data: dict) -> int:
+    """Insert an allergy record. Returns the new row id."""
+    cursor = conn.execute(
+        """INSERT INTO allergies(allergen, reaction, severity, noted_date)
+        VALUES (?, ?, ?, ?)""",
+        (
+            data.get("allergen"),
+            data.get("reaction"),
+            data.get("severity"),
+            data.get("noted_date"),
+        )
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_allergies(conn: sqlite3.Connection) -> list[dict]:
+    """Return all allergy records."""
+    cursor = conn.execute(
+        """SELECT allergen, reaction, severity, noted_date
+        FROM allergies
+        ORDER BY noted_date DESC"""
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+# ── Duplicate document detection ──────────────────────────
+
+def check_duplicate(conn: sqlite3.Connection, file_hash: str) -> dict | None:
+    """Return the existing document record if this hash was already ingested, else None."""
+    cursor = conn.execute(
+        "SELECT file_hash, file_path, ingested_at FROM ingested_documents WHERE file_hash = ?",
+        (file_hash,)
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def save_document_hash(conn: sqlite3.Connection, file_hash: str, file_path: str) -> None:
+    """Record a successfully ingested document hash."""
+    conn.execute(
+        "INSERT INTO ingested_documents(file_hash, file_path) VALUES (?, ?)",
+        (file_hash, file_path)
+    )
+    conn.commit()

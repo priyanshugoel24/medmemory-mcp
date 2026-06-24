@@ -1,22 +1,30 @@
 from datetime import date
-from mcp.server.experimental import task_result_handler
-from ingestion.extractor import extract_text_or_image
-from ingestion import vaccine_schedule
-from ingestion import vaccine_schedule
-from ingestion import vaccine_schedule
-from ingestion import vaccine_schedule
-from db.database import get_all_vaccinations
-from typing import AsyncIterator
+from pathlib import Path
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from mcp.server.fastmcp import FastMCP, Context
-from db.database import get_connection, get_active_medications, get_lab_trend as db_get_lab_trend, insert_medications, insert_lab_result, insert_visit, get_visit_history as db_get_visit_history, insert_vaccination, get_all_vaccinations
-import sqlite3
-from ingestion.extractor import extract_text, extract_health_entities
+from db.database import (
+    get_connection,
+    get_active_medications,
+    get_lab_trend as db_get_lab_trend,
+    insert_medications,
+    insert_lab_result,
+    insert_visit,
+    get_visit_history as db_get_visit_history,
+    insert_vaccination,
+    get_all_vaccinations,
+    insert_allergy,
+    get_allergies as db_get_allergies,
+    check_duplicate,
+    save_document_hash,
+)
+from ingestion.extractor import extract_text_or_image, extract_health_entities, compute_file_hash
 from ingestion.vaccine_schedule import WHO_ADULT_SCHEDULE
 import httpx
 import os
 from logger import get_logger
+
+SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 
 
 
@@ -74,90 +82,198 @@ async def get_lab_trend(ctx : Context, marker_name : str) -> list[dict]:
     
 
 @mcp.tool()
-async def ingest_health_documents(file_path : str, ctx : Context) -> dict:
-    """Ingest a health document (PDF for image) into the MedMemory database.
+async def ingest_health_documents(file_path: str, ctx: Context) -> dict:
+    """Ingest a health document (PDF or image) into the MedMemory database.
 
-    Use this when the user wants to add a prescription, lab report, or any medical document to their health record. Extracts medications, lab results,and diagnoses automatically using AI.
+    Use this when the user wants to add a prescription, lab report, or any medical document to their health record. Extracts medications, lab results, diagnoses, and allergies automatically using AI.
 
-    Args :
-        file_path : Absolute path to the PDF or image file to ingest.
+    Args:
+        file_path: Absolute path to the PDF or image file to ingest.
     """
 
     logger.info(f"ingest_health_document called | file={file_path}")
     db = ctx.request_context.lifespan_context["db"]
 
-    #Step1 : extract text from the document
+    # Day 19 — validate file exists
+    path = Path(file_path)
+    if not path.exists():
+        logger.warning(f"File not found: {file_path}")
+        return {"success": False, "error": f"File not found: {file_path}"}
+
+    # Day 19 — validate file type
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        logger.warning(f"Unsupported file type: {path.suffix} | file={file_path}")
+        return {
+            "success": False,
+            "error": (
+                f"Unsupported file type '{path.suffix}'. "
+                f"Supported types: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            ),
+        }
+
+    # Day 18 — duplicate detection
     try:
-        content, mode = extract_text_or_image(file_path)
+        file_hash = compute_file_hash(file_path)
+    except OSError as e:
+        logger.error(f"Could not read file for hashing: {e}")
+        return {"success": False, "error": f"Could not read file: {e}"}
+
+    existing = check_duplicate(db, file_hash)
+    if existing:
+        logger.info(f"Duplicate document detected | hash={file_hash} | original={existing['file_path']}")
+        return {
+            "success": False,
+            "already_ingested": True,
+            "message": (
+                f"This document was already ingested on {existing['ingested_at']} "
+                f"(original path: {existing['file_path']})."
+            ),
+        }
+
+    # Step 1 — extract text / image content
+    try:
+        content, mode, extraction_warnings = extract_text_or_image(file_path)
         logger.debug(f"Extraction mode={mode} | content_length={len(content)}")
-    except FileNotFoundError:
-        logger.warning(f"File not found : {file_path}")
-        return {"success" : False, "error" : f"File not found : {file_path}"}
-    except ValueError as e:
-        logger.error(f"file extraction failed : {e}")
-        return {"success" : False, "error" : str(e)}
+    except Exception as e:
+        logger.error(f"File extraction failed: {e}")
+        return {"success": False, "error": f"File extraction failed: {e}"}
 
-    if not content.strip() and mode == "text":
-        logger.error("No text extracted from document")
-        return {"success" : False, "error" : "Could not extract any text from the document."}
+    # Day 19 — blank / corrupted document
+    if mode == "text" and not content.strip():
+        logger.error(f"No text extracted from document | file={file_path}")
+        return {
+            "success": False,
+            "error": "Could not extract any text from the document. It may be blank or corrupted.",
+        }
 
-    #Step 2 : extract structured health entities via Gemini
+    # Step 2 — extract structured health entities via Gemini
     try:
         entities = extract_health_entities(content, mode)
         logger.info(
             f"Entities extracted | type={entities.get('document_type')} | "
             f"meds={len(entities.get('medications', []))} | "
-            f"labs={len(    entities.get('lab_results', []))}"
-            )
+            f"labs={len(entities.get('lab_results', []))}"
+        )
+    except RuntimeError as e:
+        # Gemini API-level failure (network, auth, quota, etc.)
+        logger.error(f"Gemini API failure: {e}")
+        return {
+            "success": False,
+            "error": f"AI extraction failed: {e}. Please try again in a moment.",
+        }
+    except ValueError as e:
+        # Bad JSON response from Gemini
+        logger.error(f"Gemini returned unparseable response: {e}")
+        return {
+            "success": False,
+            "error": f"AI extraction returned an invalid response: {e}. Please try again.",
+        }
     except Exception as e:
-        logger.error(f"AI extraction failed : {e}")
-        return {"success" : False, "error" : f"AI extraction failed : {e}"}
+        logger.error(f"Unexpected AI extraction error: {e}")
+        return {"success": False, "error": f"AI extraction failed: {e}"}
 
-    #Step 3 : save medications to DB
+    # Day 19 — non-medical document
+    if entities.get("document_type") == "non_medical":
+        logger.warning(f"Non-medical document detected | file={file_path}")
+        return {
+            "success": False,
+            "non_medical": True,
+            "message": (
+                "This document does not appear to be a medical record "
+                "(prescription, lab report, discharge summary, or vaccination record). "
+                "No data was saved."
+            ),
+        }
+
+    # Step 3 — save medications
     meds_saved = 0
     for med in entities.get("medications", []):
         if med.get("drug_name"):
             insert_medications(db, {
-                "drug_name" : med["drug_name"],
-                "dose" : med.get("dose"),
-                "frequency" : med.get("frequency"),
-                "condition_treated" : med.get("condition_treated"),
-                "is_active" : 1,
-                "start_date" : entities.get("document_date"),
-                "source_document" : file_path,
+                "drug_name": med["drug_name"],
+                "dose": med.get("dose"),
+                "frequency": med.get("frequency"),
+                "condition_treated": med.get("condition_treated"),
+                "is_active": 1,
+                "start_date": entities.get("document_date"),
+                "source_document": file_path,
             })
             meds_saved += 1
 
-
-    #Step 4 : save lab results to DB
+    # Step 4 — save lab results
     labs_saved = 0
     for lab in entities.get("lab_results", []):
         if lab.get("marker_name") and lab.get("value") is not None:
             insert_lab_result(db, {
-                "marker_name" : lab["marker_name"],
-                "value" : lab["value"],
-                "unit" : lab.get("unit"),
-                "test_date" : entities.get("document_date"),
-                "source_document" : file_path,
+                "marker_name": lab["marker_name"],
+                "value": lab["value"],
+                "unit": lab.get("unit"),
+                "test_date": entities.get("document_date"),
+                "source_document": file_path,
             })
             labs_saved += 1
 
+    # Day 20 — save allergies
+    allergies_saved = 0
+    for allergen_entry in entities.get("allergies", []):
+        if allergen_entry:
+            allergen_text = allergen_entry if isinstance(allergen_entry, str) else allergen_entry.get("allergen", "")
+            if allergen_text:
+                insert_allergy(db, {
+                    "allergen": allergen_text,
+                    "reaction": allergen_entry.get("reaction") if isinstance(allergen_entry, dict) else None,
+                    "severity": allergen_entry.get("severity") if isinstance(allergen_entry, dict) else None,
+                    "noted_date": entities.get("document_date"),
+                })
+                allergies_saved += 1
 
-    logger.info(f"Ingestion complete | meds_saved={meds_saved} | "f"labs_saved={labs_saved} | file={file_path}")
-    #Step 5 : return a summary of what was saved
-    return {
-        "success" : True,
-        "document_type" : entities.get("document_type"),
-        "document_date" : entities.get("document_date"),
-        "doctor_name" : entities.get("doctor_name"),
-        "medications_saved" : meds_saved,
-        "lab_results_saved" : labs_saved,
-        "diagnoses" : entities.get("diagnoses", []),
-        "follow_up" : entities.get("follow_up"),
+    # Day 18 — record this document so future ingestions are detected as duplicates
+    save_document_hash(db, file_hash, file_path)
+
+    logger.info(
+        f"Ingestion complete | meds={meds_saved} | labs={labs_saved} | "
+        f"allergies={allergies_saved} | file={file_path}"
+    )
+
+    response: dict = {
+        "success": True,
+        "document_type": entities.get("document_type"),
+        "document_date": entities.get("document_date"),
+        "doctor_name": entities.get("doctor_name"),
+        "medications_saved": meds_saved,
+        "lab_results_saved": labs_saved,
+        "allergies_saved": allergies_saved,
+        "diagnoses": entities.get("diagnoses", []),
+        "follow_up": entities.get("follow_up"),
     }
+    if extraction_warnings:
+        response["warnings"] = extraction_warnings
+    return response
 
 @mcp.tool()
-async def get_visit_history(ctx : Context, speciality : str | None = None) -> list[dict] : 
+async def get_allergies(ctx: Context) -> list[dict]:
+    """Returns all recorded allergies for the patient.
+
+    Call this when the user asks about:
+    - known allergies or drug allergies
+    - whether they are allergic to anything
+    - what medications or substances to avoid
+    Always call this before performing a drug interaction check so allergy context is available.
+    """
+
+    logger.info("get_allergies called")
+    db = ctx.request_context.lifespan_context["db"]
+    allergies = db_get_allergies(db)
+
+    if not allergies:
+        return [{"message": "No allergies on record."}]
+
+    logger.info(f"get_allergies → {len(allergies)} allergies found")
+    return allergies
+
+
+@mcp.tool()
+async def get_visit_history(ctx : Context, speciality : str | None = None) -> list[dict] :
     """Use this tool when asked about:
      
      1. Doctor visits, appointments, consultations
@@ -344,10 +460,11 @@ async def generate_health_summary(ctx : Context) -> dict :
     logger.info("generate_health_summary called")
     db = ctx.request_context.lifespan_context["db"]
 
-    #Pull data from every table
+    # Pull data from every table
     medications = get_active_medications(db)
     visits = db_get_visit_history(db)
     vaccinations = get_all_vaccinations(db)
+    allergies = db_get_allergies(db)
 
 
     #Get the most recent reading for common lab markers
@@ -378,6 +495,7 @@ async def generate_health_summary(ctx : Context) -> dict :
     return {
         "generated_on": date.today().isoformat(),
         "active_medications": medications,
+        "known_allergies": allergies,
         "recent_lab_results": recent_labs,
         "recent_visits_by_specialty": recent_visits,
         "vaccinations_on_record": vaccinations,

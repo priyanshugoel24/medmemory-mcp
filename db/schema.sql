@@ -55,3 +55,10 @@ CREATE TABLE IF NOT EXISTS allergies(
     noted_date TEXT,
     created_at TEXT DEFAULT(datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS ingested_documents(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL UNIQUE,
+    file_path TEXT,
+    ingested_at TEXT DEFAULT (datetime('now'))
+);

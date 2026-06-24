@@ -3,6 +3,7 @@ import pymupdf4llm
 from pathlib import Path
 import json
 import os
+import hashlib
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -15,37 +16,65 @@ extractor_logger = get_logger("medmemory.extractor")
 
 load_dotenv()
 
+MAX_PAGES_BEFORE_TRUNCATION = 20
+TRUNCATED_PAGE_LIMIT = 10
 
-def extract_text_or_image(file_path: str) -> tuple[str, str]:
-    """Smart extraction — returns (content, mode).
+
+def compute_file_hash(file_path: str) -> str:
+    """Compute MD5 hash of a file for duplicate detection."""
+    h = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def extract_text_or_image(file_path: str) -> tuple[str, str, list[str]]:
+    """Smart extraction — returns (content, mode, warnings).
     mode is 'text' for native PDFs, 'image' for scanned/handwritten ones.
     For image mode, content is base64-encoded image data.
+    warnings is a list of non-fatal issues (e.g. page truncation).
     """
 
     extractor_logger.debug(f"Extracting from {file_path}")
     path = Path(file_path)
+    warnings: list[str] = []
 
     # For image files — always use vision mode
     if path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
         with open(file_path, "rb") as f:
-            return base64.b64encode(f.read()).decode(), "image"
+            return base64.b64encode(f.read()).decode(), "image", []
 
-    # For PDFs — try native text first
+    # For PDFs — check page count first
     doc = pymupdf.open(file_path)
-    native_text = "".join(page.get_text() for page in doc).strip()
+    total_pages = len(doc)
+
+    pages_to_read: list[int] | None = None
+    if total_pages > MAX_PAGES_BEFORE_TRUNCATION:
+        pages_to_read = list(range(TRUNCATED_PAGE_LIMIT))
+        msg = (
+            f"Document has {total_pages} pages; only the first "
+            f"{TRUNCATED_PAGE_LIMIT} pages were processed."
+        )
+        warnings.append(msg)
+        extractor_logger.warning(f"Large PDF ({total_pages} pages): truncating to {TRUNCATED_PAGE_LIMIT} | {file_path}")
+
+    page_indices = pages_to_read if pages_to_read is not None else list(range(total_pages))
+    native_text = "".join(doc[i].get_text() for i in page_indices).strip()
 
     if len(native_text) > 100:
         # Good native text — use pymupdf4llm for clean markdown
         doc.close()
-        return pymupdf4llm.to_markdown(file_path), "text"
+        md = pymupdf4llm.to_markdown(file_path, pages=page_indices)
+        return md, "text", warnings
     else:
         # Scanned PDF — render first page as image for Gemini Vision
         page = doc[0]
-        mat = pymupdf.Matrix(2, 2) # 2x zoom for better quality
+        mat = pymupdf.Matrix(2, 2)  # 2x zoom for better quality
         pix = page.get_pixmap(matrix=mat)
         img_bytes = pix.tobytes("png")
         doc.close()
-        return base64.b64encode(img_bytes).decode(), "image"
+        return base64.b64encode(img_bytes).decode(), "image", warnings
 
 
 
@@ -162,41 +191,49 @@ def extract_health_entities(content: str, mode: str = "text") -> dict:
     """Extract health entities via Gemini.
     mode='text': send as text prompt
     mode='image': send as inline image for vision
+    Raises RuntimeError on Gemini API failure, ValueError on bad JSON.
     """
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
 
-    if mode == "text":
-        prompt = f"{EXTRACTION_PROMPT}\n\nExtract health entities from this document:\n\n{content}"
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-    else:
-        # Image mode — Gemini Vision reads the image directly
-        from google.genai import types
-        image_part = types.Part.from_bytes(
-            data=base64.b64decode(content),
-            mime_type="image/png"
-        )
-        text_part = types.Part.from_text(
-            text=f"{EXTRACTION_PROMPT}\n\nExtract health entities from this medical document image:"
-        )
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[text_part, image_part]
-        )
+    try:
+        client = genai.Client(api_key=api_key)
 
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            raw = raw.rsplit("```", 1)[0].strip()
+        if mode == "text":
+            prompt = f"{EXTRACTION_PROMPT}\n\nExtract health entities from this document:\n\n{content}"
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+        else:
+            # Image mode — Gemini Vision reads the image directly
+            image_part = types.Part.from_bytes(
+                data=base64.b64decode(content),
+                mime_type="image/png"
+            )
+            text_part = types.Part.from_text(
+                text=f"{EXTRACTION_PROMPT}\n\nExtract health entities from this medical document image:"
+            )
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[text_part, image_part]
+            )
 
-        extractor_logger.debug(f"Gemini response length: {len(raw)} chars")
+    except Exception as e:
+        raise RuntimeError(f"Gemini API call failed: {e}") from e
 
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Gemini returned invalid JSON: {e}\nRaw: {raw[:200]}")
+    raw = response.text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1]
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    extractor_logger.debug(f"Gemini response length: {len(raw)} chars")
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Gemini returned invalid JSON: {e}\nRaw: {raw[:200]}")
 
 
     
