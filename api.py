@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import date, datetime
 import tempfile
 import os
 import shutil
@@ -12,6 +13,7 @@ from db.database import (
     get_connection, get_active_medications, get_lab_trend, get_all_vaccinations, get_allergies, get_visit_history
 )
 from ingestion.extractor import extract_text_or_image, extract_health_entities
+from ingestion.vaccine_schedule import WHO_ADULT_SCHEDULE
 from db.database import insert_medications, insert_lab_result
 from logger import get_logger
 
@@ -67,6 +69,112 @@ def visits(specialty: str = None):
         return {"visits": get_visit_history(conn, specialty)}
     finally:
         conn.close()
+
+
+@app.get("/vaccination-status")
+def vaccination_status():
+    conn = get_connection()
+    try:
+        records = get_all_vaccinations(conn)
+
+        # Keep the most recent record per vaccine
+        received = {}
+        for r in records:
+            name_lower = r["vaccine_name"].lower()
+            if name_lower not in received or r["date_administered"] > received[name_lower]["date_administered"]:
+                received[name_lower] = r
+
+        today = date.today()
+        overdue = []
+        missing = []
+
+        for vaccine_name, schedule in WHO_ADULT_SCHEDULE.items():
+            record = received.get(vaccine_name.lower())
+
+            if record is None:
+                missing.append({"vaccine": vaccine_name, "notes": schedule["notes"]})
+            elif schedule["interval_years"] is not None:
+                last_date = datetime.strptime(record["date_administered"], "%Y-%m-%d").date()
+                years_since = (today - last_date).days / 365.25
+                if years_since > schedule["interval_years"]:
+                    overdue.append({
+                        "vaccine": vaccine_name,
+                        "last_received": record["date_administered"],
+                        "overdue_by_years": round(years_since - schedule["interval_years"], 1),
+                        "notes": schedule["notes"],
+                    })
+
+        return {
+            "vaccinations_on_record": records,
+            "overdue": overdue,
+            "missing": missing,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/lab-markers")
+def lab_markers():
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT DISTINCT marker_name FROM lab_results ORDER BY marker_name ASC"
+        )
+        return {"markers": [row["marker_name"] for row in cursor.fetchall()]}
+    finally:
+        conn.close()
+
+
+@app.get("/summary")
+def summary():
+    conn = get_connection()
+    try:
+        medications = get_active_medications(conn)
+        visits = get_visit_history(conn)
+        vaccinations = get_all_vaccinations(conn)
+        allergies = get_allergies(conn)
+
+        # Get the most recent reading for common lab markers
+        common_markers = ["HbA1c", "TSH", "creatinine", "hemoglobin",
+                           "cholesterol", "blood pressure", "fasting glucose"]
+        recent_labs = {}
+        for marker in common_markers:
+            trend = get_lab_trend(conn, marker)
+            if trend:
+                recent_labs[marker] = trend[-1]
+
+        pending_followups = [{
+            "from_visit": v["visit_date"],
+            "doctor": v["doctor_name"],
+            "follow_up": v["follow_up"]
+        } for v in visits
+            if v.get("follow_up") and v["follow_up"].lower() != "none"
+        ]
+
+        # Most recent visit per speciality
+        seen_specialities = set()
+        recent_visits = []
+        for v in visits:
+            if v["speciality"] not in seen_specialities:
+                seen_specialities.add(v["speciality"])
+                recent_visits.append(v)
+
+        return {
+            "generated_on": date.today().isoformat(),
+            "active_medications": medications,
+            "known_allergies": allergies,
+            "recent_lab_results": recent_labs,
+            "recent_visits_by_specialty": recent_visits,
+            "vaccinations_on_record": vaccinations,
+            "pending_follow_ups": pending_followups,
+            "disclaimer": (
+                "This summary is generated from personally stored health records. "
+                "Always verify with your healthcare provider before making medical decisions."
+            )
+        }
+    finally:
+        conn.close()
+
 
 @app.post("/ingest")
 async def ingest(file: UploadFile = File(...)):
